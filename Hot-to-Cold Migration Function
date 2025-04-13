@@ -1,0 +1,48 @@
+# File: migrate_to_blob/__init__.py
+import datetime
+import logging
+import azure.functions as func
+from azure.cosmos import CosmosClient
+from azure.storage.blob import BlobServiceClient
+import json
+import os
+
+COSMOS_ENDPOINT = os.environ["COSMOS_ENDPOINT"]
+COSMOS_KEY = os.environ["COSMOS_KEY"]
+DATABASE_NAME = os.environ["DATABASE_NAME"]
+CONTAINER_NAME = os.environ["CONTAINER_NAME"]
+
+BLOB_CONN_STR = os.environ["BLOB_CONN_STR"]
+BLOB_CONTAINER = os.environ["BLOB_CONTAINER"]
+
+def main(mytimer: func.TimerRequest) -> None:
+    logging.info('Migration Function Started...')
+
+    cosmos_client = CosmosClient(COSMOS_ENDPOINT, COSMOS_KEY)
+    db = cosmos_client.get_database_client(DATABASE_NAME)
+    container = db.get_container_client(CONTAINER_NAME)
+
+    blob_client = BlobServiceClient.from_connection_string(BLOB_CONN_STR)
+    blob_container = blob_client.get_container_client(BLOB_CONTAINER)
+
+    # Calculate the date threshold (3 months ago)
+    threshold_date = (datetime.datetime.utcnow() - datetime.timedelta(days=90)).isoformat()
+
+    query = f"SELECT * FROM c WHERE c.billingDate < '{threshold_date}'"
+    items = list(container.query_items(query=query, enable_cross_partition_query=True))
+
+    for item in items:
+        record_id = item["id"]
+        customer_id = item.get("customerId", "unknown")
+        billing_date = item.get("billingDate", "no-date")[:10]
+
+        # Organize file path
+        path = f"{billing_date}/{customer_id}/{record_id}.json"
+        blob_data = json.dumps(item)
+
+        blob_container.upload_blob(name=path, data=blob_data, overwrite=True)
+
+        container.delete_item(item=item, partition_key=item["partitionKey"])
+        logging.info(f"Moved record {record_id} to blob.")
+
+    logging.info('Migration Function Completed.')
